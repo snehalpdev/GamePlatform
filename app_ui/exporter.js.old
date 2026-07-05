@@ -1,0 +1,239 @@
+const canvas = document.getElementById('paintCanvas');
+const ctx = canvas.getContext('2d');
+const themeDropdown = document.getElementById('themeSelect');
+const enhanceButton = document.getElementById('enhanceBtn');
+const audioPlayer = document.getElementById('ambientAudioPlayer');
+const slotSelector = document.getElementById('projectSlotSelect');
+const skinSelector = document.getElementById('characterSkinSelect');
+const marqueeBox = document.getElementById('marqueeBox');
+const canvasContainer = document.getElementById('canvasContainer');
+const brushModeSelect = document.getElementById('brushModeSelect');
+const lightSlider = document.getElementById('ambientLightSlider');
+const lightDisplay = document.getElementById('lightValDisplay');
+
+let painting = false;
+let brushColor = '#000000';
+let runtimeCustomThemes = {};
+let customUploadedSpriteBase64 = null;
+
+ctx.imageSmoothingEnabled = false;
+ctx.fillStyle = '#ffffff';
+ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+const THEME_AUDIO_MAP = {
+    "cozy_tavern": "https://google.com",
+    "cyberpunk_cafe": "https://googleapis.com",
+    "forest_market": "https://google.com",
+    "retro_arcade": "https://googleapis.com",
+    "custom": "https://google.com"
+};
+
+const CHARACTER_SKIN_MAP = {
+    "chef_male": "https://phaser.io",
+    "baker_female": "https://phaser.io",
+    "cyborg_waiter": "https://phaser.io",
+    "rogue_adventurer": "https://phaser.io"
+};
+
+lightSlider.addEventListener('input', () => { lightDisplay.innerText = `${lightSlider.value}%`; });
+function setBrush(color) { brushColor = color; }
+
+// ─── MATRIX SURFACE DRAWING UTILS ───────────────────────────────────────────
+canvas.addEventListener('mousedown', (e) => { if(e.button === 0) painting = true; });
+canvas.addEventListener('mouseup', () => { painting = false; ctx.beginPath(); });
+canvas.addEventListener('mousemove', (e) => {
+    if (!painting) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.floor((e.clientX - rect.left) / 16) * 16;
+    const y = Math.floor((e.clientY - rect.top) / 16) * 16;
+    
+    if (brushModeSelect.value === "autotile" && brushColor === '#ffffff') {
+        ctx.fillStyle = '#ffffff'; ctx.fillRect(x, y, 16, 16);
+        const lN = ctx.getImageData(x - 16, y, 1, 1).data;
+        ctx.fillStyle = '#e1e1e6';
+        if (lN[0]===0 && lN[1]===0) ctx.fillRect(x, y, 3, 16);
+    } else {
+        ctx.fillStyle = brushColor === 'eraser' ? '#ffffff' : brushColor;
+        ctx.fillRect(x, y, 16, 16);
+    }
+});
+
+// ─── LOCAL INPAINT SELECTION WINDOW (RIGHT-CLICK) ───────────────────────────
+let startX, startY;
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 2) return;
+    const rect = canvas.getBoundingClientRect();
+    startX = e.clientX - rect.left; startY = e.clientY - rect.top;
+    marqueeBox.style.left = startX + 'px'; marqueeBox.style.top = startY + 'px';
+    marqueeBox.style.width = '0px'; marqueeBox.style.height = '0px'; marqueeBox.style.display = 'block';
+});
+canvas.addEventListener('mousemove', (e) => {
+    if (marqueeBox.style.display !== 'block') return;
+    const rect = canvas.getBoundingClientRect();
+    const cX = e.clientX - rect.left; const cY = e.clientY - rect.top;
+    marqueeBox.style.left = (Math.min(startX, cX) + canvas.offsetLeft) + 'px';
+    marqueeBox.style.top = (Math.min(startY, cY) + canvas.offsetTop) + 'px';
+    marqueeBox.style.width = Math.abs(startX - cX) + 'px';
+    marqueeBox.style.height = Math.abs(startY - cY) + 'px';
+});
+window.addEventListener('mouseup', (e) => { if (e.button === 2) marqueeBox.style.display = 'none'; });
+
+// ─── EXTENSION PACK CONTROLLERS ─────────────────────────────────────────────
+document.getElementById('saveThemeBtn').addEventListener('click', () => {
+    const name = document.getElementById('customThemeName').value;
+    const prompt = document.getElementById('customThemePrompt').value;
+    if (!name || !prompt) return;
+    const key = "custom_" + name.toLowerCase().replace(/\s+/g, '_');
+    runtimeCustomThemes[key] = prompt;
+    const opt = document.createElement('option'); opt.value = key; opt.innerText = "🛠️ " + name;
+    themeDropdown.appendChild(opt); themeDropdown.value = key;
+});
+
+themeDropdown.addEventListener('change', () => {
+    audioPlayer.src = THEME_AUDIO_MAP[themeDropdown.value] || THEME_AUDIO_MAP["custom"];
+    audioPlayer.volume = 0.3; audioPlayer.play().catch(()=>{});
+});
+
+const spriteInput = document.getElementById('customSpriteInput');
+spriteInput.addEventListener('change', (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const r = new FileReader(); r.onload = (evt) => {
+        customUploadedSpriteBase64 = evt.target.result;
+        document.getElementById('uploadFeedback').style.display = 'block';
+        if (!document.querySelector("option[value='custom_upload']")) {
+            const opt = document.createElement('option'); opt.value = "custom_upload"; opt.innerText = "⭐ Custom Sheet";
+            skinSelector.appendChild(opt);
+        }
+        skinSelector.value = "custom_upload";
+    }; r.readAsDataURL(file);
+});
+
+// ─── API DATA TRANSACTION MANAGER ───────────────────────────────────────────
+enhanceButton.addEventListener('click', async () => {
+    enhanceButton.disabled = true; enhanceButton.innerText = "🔮 GENERATING PIXELS...";
+    let selectedTheme = themeDropdown.value; let customPrompt = "";
+    if (selectedTheme.startsWith("custom_")) { customPrompt = runtimeCustomThemes[selectedTheme]; selectedTheme = "custom_override_flag"; }
+
+    try {
+        const res = await fetch("http://localhost:7860/api/enhance", {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image: canvas.toDataURL('image/png'), theme: selectedTheme, custom_prompt_extension: customPrompt })
+        });
+        const r = await res.json(); const img = new Image();
+        img.onload = () => { ctx.clearRect(0,0,512,512); ctx.drawImage(img,0,0); };
+        img.src = r.enhancedImage;
+    } catch (e) { alert("API Connection Error."); }
+    finally { enhanceButton.disabled = false; enhanceButton.innerText = "⚡ AI Enhance Region"; }
+});
+
+// ─── FILE SLOTS CONFIGURATION ───────────────────────────────────────────────
+document.getElementById('saveProjectBtn').addEventListener('click', () => {
+    localStorage.setItem(slotSelector.value, JSON.stringify({ img: canvas.toDataURL('image/png'), theme: themeDropdown.value, skin: skinSelector.value }));
+    alert("Map layout checkpoint saved successfully.");
+});
+document.getElementById('loadProjectBtn').addEventListener('click', () => {
+    const data = localStorage.getItem(slotSelector.value); if (!data) return;
+    const p = JSON.parse(data); themeDropdown.value = p.theme; skinSelector.value = p.skin;
+    const img = new Image(); img.onload = () => { ctx.clearRect(0,0,512,512); ctx.drawImage(img,0,0); }; img.src = p.img;
+});
+
+// ─── PHASER ENGINE VECTOR COMPILED EXPORTER ──────────────────────────────────
+document.getElementById('exportBuildBtn').addEventListener('click', async () => {
+    const mapData = canvas.toDataURL('image/png').split(',')[1];
+    const currentTheme = themeDropdown.value;
+    const audioUrl = THEME_AUDIO_MAP[currentTheme] || THEME_AUDIO_MAP["custom"];
+    let skinUrl = CHARACTER_SKIN_MAP[skinSelector.value];
+    
+    const numericLightPercentage = lightSlider.value / 100;
+    const hexVal = Math.floor(numericLightPercentage * 255).toString(16).padStart(2, '0');
+    let colorTintHex = `0x${hexVal}${hexVal}${hexVal}`;
+
+    let weatherType = "none";
+    if (currentTheme === "rainy_neon_alley" || currentTheme === "cyberpunk_market") weatherType = "rain";
+    else if (currentTheme === "alpine_snowy_lodge") weatherType = "snow";
+    else if (currentTheme === "volcanic_wasteland") weatherType = "ash";
+
+    const zip = new JSZip();
+    zip.file("assets/map.png", mapData, {base64: true});
+
+    if (skinSelector.value === "custom_upload" && customUploadedSpriteBase64) {
+        zip.file("assets/character.png", customUploadedSpriteBase64.split(',')[1], {base64: true});
+        skinUrl = 'assets/character.png';
+    }
+
+    const gameIndexTemplate = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Build Export</title>
+        <script src="https://jsdelivr.net"><\/script>
+        <style>body { margin: 0; background: #000; display: flex; justify-content: center; align-items: center; height: 100vh; overflow: hidden; }</style>
+    </head>
+    <body>
+    <script>
+        const config = { type: Phaser.AUTO, width: 512, height: 512, physics: { default: 'arcade' }, scene: { preload: preload, create: create, update: update } };
+        let player, keys, weatherParticles = [];
+        const weatherProfile = "${weatherType}";
+
+        function preload() {
+            this.load.image('map', 'assets/map.png');
+            this.load.audio('bgm', '${audioUrl}');
+            this.load.spritesheet('hero', '${skinUrl}', { frameWidth: 32, frameHeight: 48 });
+        }
+        function create() {
+            let m = this.add.image(256, 256, 'map'); m.setTint(${colorTintHex});
+            try { this.sound.add('bgm').play({ loop: true, volume: 0.3 }); } catch(e){}
+            player = this.physics.add.sprite(256, 256, 'hero'); player.setTint(${colorTintHex});
+            player.setCollideWorldBounds(true); keys = this.input.keyboard.createCursorKeys();
+
+            if (weatherProfile !== "none") {
+                let c = weatherProfile === "rain" ? 150 : 60;
+            for (let i = 0; i < c; i++) {
+                weatherParticles.push({
+                    x: Math.random() * 512,
+                    y: Math.random() * 512,
+                    vY: weatherProfile === "rain" ? 12 : 1.5,
+                    vX: weatherProfile === "snow" ? (Math.random() - 0.5) : -0.5,
+                    length: weatherProfile === "rain" ? 14 : 2,
+                    color: weatherProfile === "rain" ? 0x99b3ff : weatherProfile === "ash" ? 0xff4500 : 0xffffff,
+                    graphics: this.add.graphics()
+                });
+            }
+
+        function update() {
+            player.setVelocity(0);
+
+            if (keys.left.isDown) player.setVelocityX(-160);
+            else if (keys.right.isDown) player.setVelocityX(160);
+
+            if (keys.up.isDown) player.setVelocityY(-160);
+            else if (keys.down.isDown) player.setVelocityY(160);
+
+            for (let p of weatherParticles) {
+                p.graphics.clear();
+                p.y += p.vY;
+                p.x += p.vX;
+
+                if (p.y > 512) {
+                    p.y = -10;
+                    p.x = Math.random() * 512;
+                }
+
+                p.graphics.lineStyle(1.5, p.color, 0.6);
+
+                if (weatherProfile === "rain") {
+                    p.graphics.lineBetween(p.x, p.y, p.x + p.vX, p.y + p.length);
+                } else {
+                    p.graphics.fillStyle(p.color, 0.7);
+                    p.graphics.fillCircle(p.x, p.y, p.length);
+                }
+            }
+        }
+
+// Template and Zip Export handling
+zip.file("index.html", gameIndexTemplate);
+const archive = await zip.generateAsync({ type: "blob" });
+const dl = document.createElement('a');
+dl.href = URL.createObjectURL(archive);
+dl.download = `PlayableWorld_${currentTheme}.zip`;
+dl.click();
